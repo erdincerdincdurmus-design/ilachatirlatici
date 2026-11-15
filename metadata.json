@@ -1,0 +1,6 @@
+{
+  "name": "İlaç Hatırlatıcı",
+  "description": "Yaşlılar için büyük puntolu, tam ekran sesli uyarı veren kolay ilaç hatırlatıcı",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
