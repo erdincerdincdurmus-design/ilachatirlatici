@@ -43,8 +43,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.alarm.AlarmPermissionHelper
+import com.example.alarm.AlarmReceiver
 import com.example.ui.MedicationViewModel
 import com.example.ui.ScreenTab
+import com.example.ui.components.AlarmPermissionsDialog
 import com.example.ui.screens.AddEditMedicationScreen
 import com.example.ui.screens.HistoryScreen
 import com.example.ui.screens.MedicationListScreen
@@ -60,6 +63,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        AlarmReceiver.createNotificationChannel(this)
+        viewModel.rescheduleAllActiveMedications("Uygulama Açılışı")
+
         setContent {
             MyApplicationTheme {
                 MainAppHost(viewModel = viewModel)
@@ -69,6 +75,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Re-check all 5 alarm permissions & channel status when returning from System Settings
+        viewModel.refreshAlarmPermissionStatus(this)
+
         // Guarantees that whenever entering or re-entering the app, it always shows the TODAY page!
         viewModel.resetToTodayScreen()
 
@@ -83,13 +92,20 @@ fun MainAppHost(viewModel: MedicationViewModel) {
     val currentTab by viewModel.currentTab.collectAsState()
     val editingMedication by viewModel.editingMedication.collectAsState()
     val isAddingNewMedication by viewModel.isAddingNewMedication.collectAsState()
+    val permissionStatus by viewModel.alarmPermissionStatus.collectAsState()
+    val hasDismissedPermissionDialog by viewModel.hasDismissedPermissionDialog.collectAsState()
 
-    // Request POST_NOTIFICATIONS on Android 13+
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { /* result handled */ }
+    ) { isGranted ->
+        viewModel.refreshAlarmPermissionStatus(context)
+        if (!isGranted) {
+            AlarmPermissionHelper.openNotificationSettings(context)
+        }
+    }
 
     LaunchedEffect(Unit) {
+        viewModel.refreshAlarmPermissionStatus(context)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val hasPermission = ContextCompat.checkSelfPermission(
                 context,
@@ -99,6 +115,22 @@ fun MainAppHost(viewModel: MedicationViewModel) {
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
+    }
+
+    if (!permissionStatus.allGranted && !hasDismissedPermissionDialog) {
+        AlarmPermissionsDialog(
+            status = permissionStatus,
+            onRequestNotificationPermission = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    AlarmPermissionHelper.openNotificationSettings(context)
+                }
+            },
+            onDismiss = {
+                viewModel.hasDismissedPermissionDialog.value = true
+            }
+        )
     }
 
     // Handle back button when in Add/Edit mode

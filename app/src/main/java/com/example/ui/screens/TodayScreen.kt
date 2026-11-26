@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.MedicationViewModel
+import com.example.ui.components.MissingPermissionsBanner
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -49,6 +50,7 @@ fun TodayScreen(
 ) {
     val doses by viewModel.todayDoses.collectAsState()
     val allMeds by viewModel.allMedications.collectAsState()
+    val permissionStatus by viewModel.alarmPermissionStatus.collectAsState()
 
     // Formatted date string in Turkish
     val todayDateFormatted = remember {
@@ -93,6 +95,15 @@ fun TodayScreen(
                     textAlign = TextAlign.Center
                 )
             }
+        }
+
+        if (!permissionStatus.allGranted) {
+            MissingPermissionsBanner(
+                status = permissionStatus,
+                onClickFix = {
+                    viewModel.hasDismissedPermissionDialog.value = false
+                }
+            )
         }
 
         // ==================== ÜST KISIM (1. YARI): ALINAN İLAÇLAR (PEMBE ARKA PLAN) ====================

@@ -4,8 +4,10 @@ import android.app.NotificationManager
 import android.content.Context
 import com.example.alarm.AlarmScheduler
 import com.example.data.PreferencesManager
+import com.example.data.dao.AlarmEventLogDao
 import com.example.data.dao.IntakeLogDao
 import com.example.data.dao.MedicationDao
+import com.example.data.model.AlarmEventLog
 import com.example.data.model.IntakeLog
 import com.example.data.model.Medication
 import kotlinx.coroutines.flow.Flow
@@ -17,12 +19,18 @@ class MedicationRepository(
     private val context: Context,
     private val medicationDao: MedicationDao,
     private val intakeLogDao: IntakeLogDao,
-    private val alarmScheduler: AlarmScheduler
+    private val alarmScheduler: AlarmScheduler,
+    private val alarmEventLogDao: AlarmEventLogDao
 ) {
     private val prefs = PreferencesManager(context)
     val allMedications: Flow<List<Medication>> = medicationDao.getAllMedications()
     val activeMedications: Flow<List<Medication>> = medicationDao.getActiveMedications()
     val allLogs: Flow<List<IntakeLog>> = intakeLogDao.getAllLogs()
+    val allAlarmLogs: Flow<List<AlarmEventLog>> = alarmEventLogDao.getAllAlarmLogs()
+
+    suspend fun clearAlarmLogs() {
+        alarmEventLogDao.clearAll()
+    }
 
     fun getTodayLogsFlow(): Flow<List<IntakeLog>> {
         val todayStr = getTodayDateString()

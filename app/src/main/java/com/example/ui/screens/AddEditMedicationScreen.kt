@@ -30,8 +30,10 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VolumeUp
@@ -51,10 +53,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -69,8 +73,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import com.example.data.model.Medication
+import com.example.data.model.ScheduleCalculator
 import com.example.ui.MedicationViewModel
 import java.io.File
+
+private sealed interface TimePickerTarget {
+    data object StartTime : TimePickerTarget
+    data class EditChip(val index: Int) : TimePickerTarget
+    data object AddNew : TimePickerTarget
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -85,12 +96,20 @@ fun AddEditMedicationScreen(
     var dosage by remember { mutableStateOf(initialMedication?.dosage ?: "1 Tablet") }
     var mealTiming by remember { mutableStateOf(initialMedication?.mealTiming ?: "Tok Karna") }
     var selectedColor by remember { mutableStateOf(initialMedication?.colorHex ?: 0xFF1E88E5) }
-    var frequencyType by remember { mutableStateOf(initialMedication?.frequencyType ?: "DAILY") }
-    var timesList by remember {
-        mutableStateOf(
-            initialMedication?.parseTimesList()?.toMutableList() ?: mutableListOf("08:00")
-        )
+    val initialIntervalDays = initialMedication?.parseIntervalDays()
+    val initialFrequencyMode = when {
+        initialIntervalDays != null -> "EVERY_N_DAYS"
+        initialMedication?.frequencyType == "CUSTOM_DAYS" || initialMedication?.frequencyType == "WEEKLY_DAYS" -> "CUSTOM_DAYS"
+        else -> "DAILY"
     }
+    var frequencyMode by remember { mutableStateOf(initialFrequencyMode) }
+    var intervalDays by remember { mutableStateOf(initialIntervalDays ?: 2) }
+
+    val initialTimes = initialMedication?.parseTimesList()?.takeIf { it.isNotEmpty() } ?: listOf("08:00")
+    var timesList by remember { mutableStateOf(initialTimes.toMutableList()) }
+    var startTime by remember { mutableStateOf(initialTimes.first()) }
+    var periodMode by remember { mutableStateOf("DAILY_COUNT") } // "DAILY_COUNT" or "HOUR_INTERVAL"
+    var dailyDoseCount by remember { mutableStateOf(initialTimes.size.coerceIn(1, 24)) }
     var intervalHours by remember { mutableStateOf(initialMedication?.intervalHours ?: 8) }
     var daysOfWeekStr by remember { mutableStateOf(initialMedication?.daysOfWeek ?: "1,2,3,4,5,6,7") }
     var customAudioPath by remember { mutableStateOf(initialMedication?.customAudioPath) }
@@ -98,8 +117,8 @@ fun AddEditMedicationScreen(
 
     val isRecording by viewModel.isRecording.collectAsState()
 
-    // Time picker dialog state
-    var showTimePickerDialog by remember { mutableStateOf(false) }
+    // Time picker dialog target (null when hidden)
+    var timePickerTarget by remember { mutableStateOf<TimePickerTarget?>(null) }
 
     // File picker launcher for audio files (.mp3, .wav, .m4a)
     val audioPickerLauncher = rememberLauncherForActivityResult(
@@ -240,7 +259,7 @@ fun AddEditMedicationScreen(
                 }
             }
 
-            // 2. Alım Sıklığı ve Gün Seçenekleri (TAM SEÇİM ÖZGÜRLÜĞÜ)
+            // 2. Alım Sıklığı ve Gün Seçenekleri (DİNAMİK SEÇİM ÖZGÜRLÜĞÜ)
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color.White),
                 shape = RoundedCornerShape(16.dp),
@@ -255,26 +274,25 @@ fun AddEditMedicationScreen(
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "İlacın hangi aralıklarla veya hangi günlerde alınacağını seçin:",
+                        text = "İlacın kaç günde bir veya haftanın hangi günlerinde alınacağını seçin:",
                         fontSize = 14.sp,
                         color = Color(0xFF64748B)
                     )
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // Frequency Mode Pills (Her Gün, 2 Günde 1, 3 Günde 1, Haftanın Belirli Günleri)
+                    // Frequency Mode Pills
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         val frequencyOptions = listOf(
                             "DAILY" to "Her Gün",
-                            "EVERY_2_DAYS" to "2 Günde 1",
-                            "EVERY_3_DAYS" to "3 Günde 1",
+                            "EVERY_N_DAYS" to "X Günde Bir",
                             "CUSTOM_DAYS" to "Belirli Günler (Haftalık)"
                         )
 
                         frequencyOptions.forEach { (type, label) ->
-                            val isSelected = frequencyType == type
+                            val isSelected = frequencyMode == type
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
                                 color = if (isSelected) Color(0xFF0284C7) else Color(0xFFF1F5F9),
@@ -283,7 +301,7 @@ fun AddEditMedicationScreen(
                                     if (isSelected) Color(0xFF0284C7) else Color(0xFFCBD5E1)
                                 ),
                                 modifier = Modifier.clickable {
-                                    frequencyType = type
+                                    frequencyMode = type
                                 }
                             ) {
                                 Text(
@@ -291,14 +309,130 @@ fun AddEditMedicationScreen(
                                     fontSize = 14.sp,
                                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                                     color = if (isSelected) Color.White else Color(0xFF334155),
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                                 )
                             }
                         }
                     }
 
+                    // Dynamic Day Interval Selector (2..90 days)
+                    if (frequencyMode == "EVERY_N_DAYS") {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Surface(
+                            color = Color(0xFFF0F9FF),
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFBAE6FD)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = "Kaç günde bir alınacak?",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF0F172A)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (intervalDays > 2) Color(0xFF0284C7) else Color(0xFFE2E8F0),
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .clickable(enabled = intervalDays > 2) {
+                                                if (intervalDays > 2) intervalDays--
+                                            }
+                                            .testTag("interval_days_decrease")
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.size(48.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Remove,
+                                                contentDescription = "Günü azalt",
+                                                tint = if (intervalDays > 2) Color.White else Color(0xFF94A3B8)
+                                            )
+                                        }
+                                    }
+
+                                    Text(
+                                        text = "$intervalDays Günde 1",
+                                        fontSize = 19.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFF0369A1),
+                                        modifier = Modifier.testTag("interval_days_value")
+                                    )
+
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (intervalDays < 90) Color(0xFF0284C7) else Color(0xFFE2E8F0),
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .clickable(enabled = intervalDays < 90) {
+                                                if (intervalDays < 90) intervalDays++
+                                            }
+                                            .testTag("interval_days_increase")
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.size(48.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Add,
+                                                contentDescription = "Günü artır",
+                                                tint = if (intervalDays < 90) Color.White else Color(0xFF94A3B8)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    val quickDayIntervals = listOf(
+                                        2 to "2 Günde 1",
+                                        3 to "3 Günde 1",
+                                        4 to "4 Günde 1",
+                                        5 to "5 Günde 1",
+                                        7 to "7 Günde 1 (Haftalık)",
+                                        10 to "10 Günde 1",
+                                        14 to "14 Günde 1",
+                                        15 to "15 Günde 1",
+                                        30 to "30 Günde 1 (Aylık)"
+                                    )
+                                    quickDayIntervals.forEach { (days, label) ->
+                                        val isPicked = intervalDays == days
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = if (isPicked) Color(0xFF0369A1) else Color.White,
+                                            border = androidx.compose.foundation.BorderStroke(
+                                                1.dp,
+                                                if (isPicked) Color(0xFF0369A1) else Color(0xFFCBD5E1)
+                                            ),
+                                            modifier = Modifier.clickable { intervalDays = days }
+                                        ) {
+                                            Text(
+                                                text = label,
+                                                fontSize = 12.sp,
+                                                fontWeight = if (isPicked) FontWeight.Bold else FontWeight.Medium,
+                                                color = if (isPicked) Color.White else Color(0xFF334155),
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Interactive 7-Day Selector if CUSTOM_DAYS is selected
-                    if (frequencyType == "CUSTOM_DAYS" || frequencyType == "WEEKLY_DAYS") {
+                    if (frequencyMode == "CUSTOM_DAYS") {
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
                             text = "Hangi günlerde alınacak? (İstediğiniz günlere dokunup seçebilirsiniz):",
@@ -348,6 +482,35 @@ fun AddEditMedicationScreen(
                             }
                         }
 
+                        Spacer(modifier = Modifier.height(8.dp))
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            val dayHelpers = listOf(
+                                "Hafta İçi" to "1,2,3,4,5",
+                                "Hafta Sonu" to "6,7",
+                                "Pzt-Çar-Cum" to "1,3,5",
+                                "Sal-Per-Cmt" to "2,4,6"
+                            )
+                            dayHelpers.forEach { (helperLabel, helperDays) ->
+                                val isMatch = daysOfWeekStr == helperDays
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isMatch) Color(0xFF15803D) else Color(0xFFF1F5F9),
+                                    modifier = Modifier.clickable { daysOfWeekStr = helperDays }
+                                ) {
+                                    Text(
+                                        text = helperLabel,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isMatch) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isMatch) Color.White else Color(0xFF334155),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+                        }
+
                         val selectedCount = selectedDaysSet.size
                         Text(
                             text = "Haftada $selectedCount gün seçildi.",
@@ -357,72 +520,402 @@ fun AddEditMedicationScreen(
                             modifier = Modifier.padding(top = 6.dp)
                         )
                     }
+                }
+            }
 
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Daily Dose Count / Times Presets
+            // 3. Periyot ve Alarm Saatleri (BAŞLANGIÇ SAATİNE GÖRE DİNAMİK BÖLME + DOĞRUDAN DÜZENLEME)
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "Günde Kaç Kez Alınacak?",
-                        fontSize = 15.sp,
+                        text = "3. PERİYOT VE SAATLER",
+                        fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF0F172A)
+                        color = Color(0xFF0284C7)
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Başlangıç saatini ve periyodu belirleyin; saatler başlangıç saatinize göre otomatik hesaplanır.",
+                        fontSize = 13.sp,
+                        color = Color(0xFF64748B)
+                    )
 
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Editable Başlangıç Saati row
+                    Surface(
+                        color = Color(0xFFF8FAFC),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCBD5E1)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { timePickerTarget = TimePickerTarget.StartTime }
+                            .testTag("start_time_selector")
                     ) {
-                        val timesPresets = listOf(
-                            "Günde 1 Kez (08:00)" to listOf("08:00"),
-                            "Günde 2 Kez (08:00, 20:00)" to listOf("08:00", "20:00"),
-                            "Günde 3 Kez (08:00, 13:00, 20:00)" to listOf("08:00", "13:00", "20:00"),
-                            "Günde 4 Kez (08:00, 13:00, 19:00, 23:00)" to listOf("08:00", "13:00", "19:00", "23:00")
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text(
+                                    text = "Başlangıç Saati",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF0F172A)
+                                )
+                                Text(
+                                    text = "Değiştirmek için dokunun",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF64748B)
+                                )
+                            }
 
-                        timesPresets.forEach { (label, presetTimes) ->
-                            val isPresetMatch = timesList == presetTimes
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
-                                color = if (isPresetMatch) Color(0xFF0369A1) else Color(0xFFF1F5F9),
-                                modifier = Modifier.clickable {
-                                    timesList = presetTimes.toMutableList()
-                                }
+                                color = Color(0xFF0F172A)
                             ) {
-                                Text(
-                                    text = label,
-                                    fontSize = 13.sp,
-                                    fontWeight = if (isPresetMatch) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (isPresetMatch) Color.White else Color(0xFF334155),
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
-                                )
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Schedule,
+                                        contentDescription = null,
+                                        tint = Color(0xFF38BDF8),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = startTime,
+                                        color = Color.White,
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = "Başlangıç saatini düzenle",
+                                        tint = Color(0xFF38BDF8),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
                             }
                         }
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    // Active Scheduled Hours
+                    // Periyot Subheader & Mode Toggle
                     Text(
-                        text = "Alarm Saatleri:",
-                        fontSize = 14.sp,
+                        text = "Periyot",
+                        fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF334155)
+                        color = Color(0xFF0F172A)
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        timesList.forEach { time ->
+                        val periodTabs = listOf(
+                            "DAILY_COUNT" to "Günde Kaç Kez",
+                            "HOUR_INTERVAL" to "Saat Aralığı"
+                        )
+                        periodTabs.forEach { (modeKey, modeLabel) ->
+                            val isSelected = periodMode == modeKey
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) Color(0xFF0369A1) else Color(0xFFF1F5F9),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    1.dp,
+                                    if (isSelected) Color(0xFF0369A1) else Color(0xFFCBD5E1)
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        periodMode = modeKey
+                                        timesList = if (modeKey == "DAILY_COUNT") {
+                                            ScheduleCalculator.generateDailyTimes(startTime, dailyDoseCount).toMutableList()
+                                        } else {
+                                            ScheduleCalculator.generateIntervalHourTimes(startTime, intervalHours).toMutableList()
+                                        }
+                                    }
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(vertical = 10.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = modeLabel,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isSelected) Color.White else Color(0xFF334155)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    if (periodMode == "DAILY_COUNT") {
+                        // Dynamic Daily Count Stepper (1..12) + Quick Presets
+                        Surface(
+                            color = Color(0xFFF0F9FF),
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFBAE6FD)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (dailyDoseCount > 1) Color(0xFF0369A1) else Color(0xFFE2E8F0),
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .clickable(enabled = dailyDoseCount > 1) {
+                                                if (dailyDoseCount > 1) {
+                                                    dailyDoseCount--
+                                                    timesList = ScheduleCalculator.generateDailyTimes(startTime, dailyDoseCount).toMutableList()
+                                                }
+                                            }
+                                            .testTag("period_count_decrease")
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.size(48.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Remove,
+                                                contentDescription = "Periyodu azalt",
+                                                tint = if (dailyDoseCount > 1) Color.White else Color(0xFF94A3B8)
+                                            )
+                                        }
+                                    }
+
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text(
+                                            text = "Günde $dailyDoseCount Kez",
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Color(0xFF0369A1),
+                                            modifier = Modifier.testTag("period_count_value")
+                                        )
+                                        Text(
+                                            text = "$startTime başlangıçlı",
+                                            fontSize = 12.sp,
+                                            color = Color(0xFF0284C7)
+                                        )
+                                    }
+
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (dailyDoseCount < 12) Color(0xFF0369A1) else Color(0xFFE2E8F0),
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .clickable(enabled = dailyDoseCount < 12) {
+                                                if (dailyDoseCount < 12) {
+                                                    dailyDoseCount++
+                                                    timesList = ScheduleCalculator.generateDailyTimes(startTime, dailyDoseCount).toMutableList()
+                                                }
+                                            }
+                                            .testTag("period_count_increase")
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.size(48.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Add,
+                                                contentDescription = "Periyodu artır",
+                                                tint = if (dailyDoseCount < 12) Color.White else Color(0xFF94A3B8)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    listOf(1, 2, 3, 4, 5, 6).forEach { count ->
+                                        val isPicked = dailyDoseCount == count
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = if (isPicked) Color(0xFF0369A1) else Color.White,
+                                            border = androidx.compose.foundation.BorderStroke(
+                                                1.dp,
+                                                if (isPicked) Color(0xFF0369A1) else Color(0xFFCBD5E1)
+                                            ),
+                                            modifier = Modifier.clickable {
+                                                dailyDoseCount = count
+                                                timesList = ScheduleCalculator.generateDailyTimes(startTime, count).toMutableList()
+                                            }
+                                        ) {
+                                            Text(
+                                                text = "Günde $count Kez",
+                                                fontSize = 12.sp,
+                                                fontWeight = if (isPicked) FontWeight.Bold else FontWeight.Medium,
+                                                color = if (isPicked) Color.White else Color(0xFF334155),
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Dynamic Hour Interval Stepper (Her X Saatte 1)
+                        Surface(
+                            color = Color(0xFFF0F9FF),
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFBAE6FD)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (intervalHours > 1) Color(0xFF0369A1) else Color(0xFFE2E8F0),
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .clickable(enabled = intervalHours > 1) {
+                                                if (intervalHours > 1) {
+                                                    intervalHours--
+                                                    timesList = ScheduleCalculator.generateIntervalHourTimes(startTime, intervalHours).toMutableList()
+                                                }
+                                            }
+                                            .testTag("period_hours_decrease")
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.size(48.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Remove,
+                                                contentDescription = "Saat aralığını azalt",
+                                                tint = if (intervalHours > 1) Color.White else Color(0xFF94A3B8)
+                                            )
+                                        }
+                                    }
+
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text(
+                                            text = "$intervalHours Saatte 1",
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Color(0xFF0369A1)
+                                        )
+                                        Text(
+                                            text = "$startTime başlangıçlı (24 sa)",
+                                            fontSize = 12.sp,
+                                            color = Color(0xFF0284C7)
+                                        )
+                                    }
+
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (intervalHours < 24) Color(0xFF0369A1) else Color(0xFFE2E8F0),
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .clickable(enabled = intervalHours < 24) {
+                                                if (intervalHours < 24) {
+                                                    intervalHours++
+                                                    timesList = ScheduleCalculator.generateIntervalHourTimes(startTime, intervalHours).toMutableList()
+                                                }
+                                            }
+                                            .testTag("period_hours_increase")
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.size(48.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Add,
+                                                contentDescription = "Saat aralığını artır",
+                                                tint = if (intervalHours < 24) Color.White else Color(0xFF94A3B8)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    listOf(4, 6, 8, 12).forEach { hrs ->
+                                        val isPicked = intervalHours == hrs
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = if (isPicked) Color(0xFF0369A1) else Color.White,
+                                            border = androidx.compose.foundation.BorderStroke(
+                                                1.dp,
+                                                if (isPicked) Color(0xFF0369A1) else Color(0xFFCBD5E1)
+                                            ),
+                                            modifier = Modifier.clickable {
+                                                intervalHours = hrs
+                                                timesList = ScheduleCalculator.generateIntervalHourTimes(startTime, hrs).toMutableList()
+                                            }
+                                        ) {
+                                            Text(
+                                                text = "$hrs Saatte 1",
+                                                fontSize = 12.sp,
+                                                fontWeight = if (isPicked) FontWeight.Bold else FontWeight.Medium,
+                                                color = if (isPicked) Color.White else Color(0xFF334155),
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Active Scheduled Hours (Directly Editable Chips)
+                    Text(
+                        text = "Alarm Saatleri (Düzenlemek için saate dokunun):",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF334155)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        timesList.forEachIndexed { index, time ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
                                 color = Color(0xFF0F172A),
-                                modifier = Modifier.padding(bottom = 6.dp)
+                                modifier = Modifier
+                                    .clickable {
+                                        timePickerTarget = TimePickerTarget.EditChip(index)
+                                    }
+                                    .testTag("alarm_time_chip_$index")
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Icon(
@@ -435,19 +928,31 @@ fun AddEditMedicationScreen(
                                     Text(
                                         text = time,
                                         color = Color.White,
-                                        fontSize = 15.sp,
+                                        fontSize = 16.sp,
                                         fontWeight = FontWeight.Bold
                                     )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = "Saati Düzenle",
+                                        tint = Color(0xFF94A3B8),
+                                        modifier = Modifier.size(15.dp)
+                                    )
                                     if (timesList.size > 1) {
-                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
                                         Icon(
                                             imageVector = Icons.Default.Delete,
-                                            contentDescription = "Sil",
+                                            contentDescription = "Saati Sil",
                                             tint = Color(0xFFF87171),
                                             modifier = Modifier
-                                                .size(16.dp)
+                                                .size(20.dp)
                                                 .clickable {
-                                                    timesList = timesList.filter { it != time }.toMutableList()
+                                                    val updated = timesList.filterIndexed { i, _ -> i != index }
+                                                    timesList = updated.toMutableList()
+                                                    dailyDoseCount = updated.size.coerceIn(1, 24)
+                                                    if (updated.isNotEmpty()) {
+                                                        startTime = updated.first()
+                                                    }
                                                 }
                                         )
                                     }
@@ -456,9 +961,13 @@ fun AddEditMedicationScreen(
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(10.dp))
+
                     OutlinedButton(
-                        onClick = { showTimePickerDialog = true },
-                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { timePickerTarget = TimePickerTarget.AddNew },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
                         shape = RoundedCornerShape(10.dp)
                     ) {
                         Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -468,7 +977,7 @@ fun AddEditMedicationScreen(
                 }
             }
 
-            // 3. Doz & Yemek (Opsiyonel Bilgi)
+            // 4. Doz & Yemek (Opsiyonel Bilgi)
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color.White),
                 shape = RoundedCornerShape(16.dp),
@@ -476,7 +985,7 @@ fun AddEditMedicationScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "3. DOZ & YEMEK DURUMU",
+                        text = "4. DOZ & YEMEK DURUMU",
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF0284C7)
@@ -543,7 +1052,7 @@ fun AddEditMedicationScreen(
                 }
             }
 
-            // 4. Özel Ses Dosyası / Ses Kaydı
+            // 5. Özel Ses Dosyası / Ses Kaydı
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color.White),
                 shape = RoundedCornerShape(16.dp),
@@ -551,7 +1060,7 @@ fun AddEditMedicationScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "4. SESLİ UYARI / SES DOSYASI",
+                        text = "5. SESLİ UYARI / SES DOSYASI",
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF0284C7)
@@ -648,7 +1157,7 @@ fun AddEditMedicationScreen(
                 }
             }
 
-            // 5. İlaç Rengi
+            // 6. İlaç Rengi
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color.White),
                 shape = RoundedCornerShape(16.dp),
@@ -656,7 +1165,7 @@ fun AddEditMedicationScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "5. İLAÇ RENGİ",
+                        text = "6. İLAÇ RENGİ",
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF0284C7)
@@ -699,12 +1208,17 @@ fun AddEditMedicationScreen(
             Button(
                 onClick = {
                     if (name.trim().isNotEmpty()) {
+                        val finalFrequencyType = when (frequencyMode) {
+                            "EVERY_N_DAYS" -> "EVERY_${intervalDays}_DAYS"
+                            "CUSTOM_DAYS" -> "CUSTOM_DAYS"
+                            else -> "DAILY"
+                        }
                         val medToSave = (initialMedication ?: Medication(name = name)).copy(
                             name = name.trim(),
                             dosage = dosage,
                             mealTiming = mealTiming,
                             colorHex = selectedColor,
-                            frequencyType = frequencyType,
+                            frequencyType = finalFrequencyType,
                             timesOfDay = timesList.joinToString(","),
                             intervalHours = intervalHours,
                             daysOfWeek = daysOfWeekStr,
@@ -744,48 +1258,101 @@ fun AddEditMedicationScreen(
         }
     }
 
-    // Time picker dialog
-    if (showTimePickerDialog) {
-        val timePickerState = rememberTimePickerState(initialHour = 12, initialMinute = 0, is24Hour = true)
-        Dialog(onDismissRequest = { showTimePickerDialog = false }) {
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = Color.White,
-                modifier = Modifier.padding(16.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+    // Time picker dialog (Supports editing StartTime, editing any individual time chip directly, or adding a new time)
+    timePickerTarget?.let { target ->
+        val (initHour, initMinute) = when (target) {
+            TimePickerTarget.StartTime -> ScheduleCalculator.parseTime(startTime)
+            is TimePickerTarget.EditChip -> ScheduleCalculator.parseTime(
+                timesList.getOrNull(target.index) ?: "08:00"
+            )
+            TimePickerTarget.AddNew -> 12 to 0
+        }
+        val dialogTitle = when (target) {
+            TimePickerTarget.StartTime -> "Başlangıç Saatini Düzenle"
+            is TimePickerTarget.EditChip -> "Alarm Saatini Düzenle"
+            TimePickerTarget.AddNew -> "Yeni Alarm Saati Ekle"
+        }
+        val confirmLabel = when (target) {
+            TimePickerTarget.AddNew -> "Ekle"
+            else -> "Güncelle"
+        }
+
+        key(target) {
+            val timePickerState = rememberTimePickerState(
+                initialHour = initHour,
+                initialMinute = initMinute,
+                is24Hour = true
+            )
+            Dialog(onDismissRequest = { timePickerTarget = null }) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color.White,
+                    modifier = Modifier.padding(16.dp)
                 ) {
-                    Text(
-                        text = "Alarm Saati Seçin",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF0F172A)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    TimePicker(state = timePickerState)
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        TextButton(onClick = { showTimePickerDialog = false }) {
-                            Text("İptal", fontSize = 15.sp)
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(
-                            onClick = {
-                                val hourStr = timePickerState.hour.toString().padStart(2, '0')
-                                val minStr = timePickerState.minute.toString().padStart(2, '0')
-                                val newTime = "$hourStr:$minStr"
-                                if (!timesList.contains(newTime)) {
-                                    timesList = (timesList + newTime).sorted().toMutableList()
-                                }
-                                showTimePickerDialog = false
-                            }
+                        Text(
+                            text = dialogTitle,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF0F172A)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        TimePicker(state = timePickerState)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
                         ) {
-                            Text("Ekle", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                            TextButton(onClick = { timePickerTarget = null }) {
+                                Text("İptal", fontSize = 15.sp)
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    val pickedTime = ScheduleCalculator.formatTime(
+                                        timePickerState.hour,
+                                        timePickerState.minute
+                                    )
+                                    when (target) {
+                                        TimePickerTarget.StartTime -> {
+                                            startTime = pickedTime
+                                            timesList = if (periodMode == "DAILY_COUNT") {
+                                                ScheduleCalculator.generateDailyTimes(pickedTime, dailyDoseCount).toMutableList()
+                                            } else {
+                                                ScheduleCalculator.generateIntervalHourTimes(pickedTime, intervalHours).toMutableList()
+                                            }
+                                        }
+                                        is TimePickerTarget.EditChip -> {
+                                            val updated = timesList.toMutableList()
+                                            if (target.index in updated.indices) {
+                                                updated[target.index] = pickedTime
+                                            }
+                                            val distinctList = updated.distinct().toMutableList()
+                                            timesList = distinctList
+                                            dailyDoseCount = distinctList.size.coerceIn(1, 24)
+                                            if (target.index == 0 && distinctList.isNotEmpty()) {
+                                                startTime = distinctList.first()
+                                            }
+                                        }
+                                        TimePickerTarget.AddNew -> {
+                                            val distinctList = (timesList + pickedTime)
+                                                .distinct()
+                                                .toMutableList()
+                                            timesList = distinctList
+                                            dailyDoseCount = distinctList.size.coerceIn(1, 24)
+                                            if (distinctList.isNotEmpty() && startTime.isBlank()) {
+                                                startTime = distinctList.first()
+                                            }
+                                        }
+                                    }
+                                    timePickerTarget = null
+                                }
+                            ) {
+                                Text(confirmLabel, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }

@@ -208,10 +208,10 @@ fun MedicationCardItem(
             Spacer(modifier = Modifier.height(6.dp))
 
             // Frequency and details in clean standard font
-            val frequencyLabel = when (medication.frequencyType) {
-                "EVERY_2_DAYS" -> "2 Günde 1"
-                "EVERY_3_DAYS" -> "3 Günde 1"
-                "CUSTOM_DAYS", "WEEKLY_DAYS" -> {
+            val intervalDays = medication.parseIntervalDays()
+            val frequencyLabel = when {
+                intervalDays != null -> "$intervalDays Günde 1"
+                medication.frequencyType == "CUSTOM_DAYS" || medication.frequencyType == "WEEKLY_DAYS" -> {
                     val daysMap = mapOf(1 to "Pzt", 2 to "Sal", 3 to "Çar", 4 to "Per", 5 to "Cum", 6 to "Cmt", 7 to "Paz")
                     val dList = medication.daysOfWeek.split(",").mapNotNull { it.trim().toIntOrNull() }
                     "Haftalık: " + dList.mapNotNull { daysMap[it] }.joinToString(", ")

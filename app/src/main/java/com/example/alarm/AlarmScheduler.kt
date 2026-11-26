@@ -6,9 +6,21 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import com.example.data.AlarmEventLogger
+import com.example.data.AppDatabase
 import com.example.data.PreferencesManager
 import com.example.data.model.Medication
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
+import java.util.Locale
+
+data class ScheduleOutcome(
+    val success: Boolean,
+    val triggerAtMillis: Long = 0L,
+    val methodUsed: String = "",
+    val error: String? = null
+)
 
 class AlarmScheduler(private val context: Context) {
 
@@ -28,6 +40,14 @@ class AlarmScheduler(private val context: Context) {
         const val EXTRA_AUDIO_PATH = "extra_audio_path"
         const val EXTRA_IS_SNOOZE = "extra_is_snooze"
         const val EXTRA_IS_TEST = "extra_is_test"
+
+        // Schedule metadata carried in Intent so AlarmReceiver can schedule the next occurrence
+        // BEFORE reading the database.
+        const val EXTRA_FREQUENCY_TYPE = "extra_frequency_type"
+        const val EXTRA_DAYS_OF_WEEK = "extra_days_of_week"
+        const val EXTRA_TIMES_OF_DAY = "extra_times_of_day"
+        const val EXTRA_INTERVAL_HOURS = "extra_interval_hours"
+        const val EXTRA_CREATED_AT = "extra_created_at"
     }
 
     init {
@@ -35,14 +55,95 @@ class AlarmScheduler(private val context: Context) {
     }
 
     /**
-     * Schedules alarms for all scheduled times of an active medication.
+     * Schedules the NEXT occurrence of an alarm using ONLY Intent extras (zero database reads).
+     * Intended to run at the very beginning of AlarmReceiver.onReceive().
      */
-    fun scheduleMedication(medication: Medication) {
-        if (!medication.isActive) {
-            cancelMedication(medication)
-            return
+    fun scheduleNextOccurrenceFromIntent(intent: Intent): ScheduleOutcome {
+        val medicationId = intent.getLongExtra(EXTRA_MEDICATION_ID, -1L)
+        val scheduledTime = intent.getStringExtra(EXTRA_SCHEDULED_TIME) ?: ""
+        if (medicationId <= 0L || medicationId == 999999L || !scheduledTime.contains(":")) {
+            return ScheduleOutcome(
+                success = false,
+                error = "Geçersiz ilaç kimliği veya saat ($medicationId / $scheduledTime)"
+            )
         }
 
+        val parts = scheduledTime.split(":")
+        val hour = parts.getOrNull(0)?.toIntOrNull()
+        val minute = parts.getOrNull(1)?.toIntOrNull()
+        if (hour == null || minute == null) {
+            return ScheduleOutcome(
+                success = false,
+                error = "Saat ayrıştırılamadı: $scheduledTime"
+            )
+        }
+
+        val name = intent.getStringExtra(EXTRA_MEDICATION_NAME) ?: "İlaç"
+        val dosage = intent.getStringExtra(EXTRA_DOSAGE) ?: "1 Tablet"
+        val mealTiming = intent.getStringExtra(EXTRA_MEAL_TIMING) ?: "Tok Karna"
+        val colorHex = intent.getLongExtra(EXTRA_COLOR_HEX, 0xFF1976D2)
+        val audioPath = intent.getStringExtra(EXTRA_AUDIO_PATH)
+        val frequencyType = intent.getStringExtra(EXTRA_FREQUENCY_TYPE) ?: "DAILY"
+        val daysOfWeek = intent.getStringExtra(EXTRA_DAYS_OF_WEEK) ?: "1,2,3,4,5,6,7"
+        val timesOfDay = intent.getStringExtra(EXTRA_TIMES_OF_DAY) ?: scheduledTime
+        val intervalHours = intent.getIntExtra(EXTRA_INTERVAL_HOURS, 8)
+        val createdAt = intent.getLongExtra(EXTRA_CREATED_AT, System.currentTimeMillis())
+
+        val ephemeralMed = Medication(
+            id = medicationId,
+            name = name,
+            dosage = dosage,
+            mealTiming = mealTiming,
+            colorHex = colorHex,
+            frequencyType = frequencyType,
+            timesOfDay = timesOfDay,
+            intervalHours = intervalHours,
+            daysOfWeek = daysOfWeek,
+            customAudioPath = audioPath,
+            isActive = true,
+            createdAt = createdAt
+        )
+
+        val nowPlusBuffer = System.currentTimeMillis() + 60_000L
+        val calendar = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, hour)
+            set(Calendar.MINUTE, minute)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+            while (timeInMillis <= nowPlusBuffer) {
+                add(Calendar.DAY_OF_YEAR, 1)
+            }
+        }
+
+        var attempts = 0
+        val maxAttempts = (ephemeralMed.parseIntervalDays() ?: 7) + 7
+        while (attempts < maxOf(14, maxAttempts) && !ephemeralMed.appliesToToday(calendar)) {
+            calendar.add(Calendar.DAY_OF_YEAR, 1)
+            attempts++
+        }
+
+        val requestCode = getRequestCode(medicationId, hour, minute)
+        val nextIntent = createAlarmIntent(ephemeralMed, scheduledTime, isSnooze = false)
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            requestCode,
+            nextIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return scheduleExact(calendar.timeInMillis, pendingIntent)
+    }
+
+    /**
+     * Schedules alarms for all scheduled times of an active medication.
+     */
+    fun scheduleMedication(medication: Medication): Int {
+        if (!medication.isActive) {
+            cancelMedication(medication)
+            return 0
+        }
+
+        var scheduledCount = 0
         val times = medication.parseTimesList()
         for (timeStr in times) {
             val parts = timeStr.split(":")
@@ -63,7 +164,8 @@ class AlarmScheduler(private val context: Context) {
             }
 
             var attempts = 0
-            while (attempts < 14 && !medication.appliesToToday(calendar)) {
+            val maxAttempts = (medication.parseIntervalDays() ?: 7) + 7
+            while (attempts < maxOf(14, maxAttempts) && !medication.appliesToToday(calendar)) {
                 calendar.add(Calendar.DAY_OF_YEAR, 1)
                 attempts++
             }
@@ -77,8 +179,54 @@ class AlarmScheduler(private val context: Context) {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            scheduleExact(calendar.timeInMillis, pendingIntent)
-            Log.d("AlarmScheduler", "Scheduled alarm for ${medication.name} at ${calendar.time}")
+            val outcome = scheduleExact(calendar.timeInMillis, pendingIntent)
+            if (outcome.success) {
+                scheduledCount++
+            } else {
+                AlarmEventLogger.log(
+                    context = context,
+                    eventType = AlarmEventLogger.TYPE_ERROR,
+                    medicationId = medication.id,
+                    medicationName = medication.name,
+                    scheduledTime = timeStr,
+                    details = "Alarm kurulamadı: ${outcome.error ?: "Bilinmeyen hata"}"
+                )
+            }
+            Log.d("AlarmScheduler", "Scheduled alarm for ${medication.name} at ${calendar.time} (${outcome.methodUsed})")
+        }
+        return scheduledCount
+    }
+
+    /**
+     * Re-arms all active medications from Room DB (used on app launch, boot, and daily WorkManager).
+     */
+    suspend fun rescheduleAllActiveMedications(source: String): Int {
+        return try {
+            val db = AppDatabase.getDatabase(context)
+            val activeMeds = db.medicationDao().getActiveMedicationsSync()
+            var totalAlarms = 0
+            for (med in activeMeds) {
+                totalAlarms += scheduleMedication(med)
+            }
+            AlarmEventLogger.log(
+                context = context,
+                eventType = AlarmEventLogger.TYPE_RESCHEDULED,
+                medicationId = -1L,
+                medicationName = "${activeMeds.size} aktif ilaç",
+                scheduledTime = "",
+                details = "$source: ${activeMeds.size} aktif ilaç için $totalAlarms alarm yeniden kuruldu."
+            )
+            totalAlarms
+        } catch (t: Throwable) {
+            AlarmEventLogger.log(
+                context = context,
+                eventType = AlarmEventLogger.TYPE_ERROR,
+                medicationId = -1L,
+                medicationName = "Sistem",
+                scheduledTime = "",
+                details = "$source sırasında alarmlar yeniden kurulamadı: ${t.localizedMessage ?: t::class.java.simpleName}"
+            )
+            0
         }
     }
 
@@ -117,7 +265,20 @@ class AlarmScheduler(private val context: Context) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        scheduleExact(triggerTime, pendingIntent)
+        val outcome = scheduleExact(triggerTime, pendingIntent)
+        val formattedTarget = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(triggerTime))
+        AlarmEventLogger.log(
+            context = context,
+            eventType = if (outcome.success) AlarmEventLogger.TYPE_NEXT_SCHEDULED else AlarmEventLogger.TYPE_ERROR,
+            medicationId = medicationId,
+            medicationName = medicationName,
+            scheduledTime = scheduledTime,
+            details = if (outcome.success) {
+                "Erteleme alarmı $delayMinutes dk sonrası ($formattedTarget) için kuruldu."
+            } else {
+                "Erteleme alarmı kurulamadı: ${outcome.error}"
+            }
+        )
         Log.d("AlarmScheduler", "Scheduled snooze alarm for $medicationName in $delayMinutes min")
     }
 
@@ -152,6 +313,7 @@ class AlarmScheduler(private val context: Context) {
     fun cancelMedicationById(medicationId: Long, times: List<String> = emptyList()) {
         cancelSnooze(medicationId)
         val combinedTimes = (times + listOf(
+            "00:00", "01:00", "02:00", "03:00", "04:00", "05:00",
             "06:00", "07:00", "08:00", "09:00", "10:00", "11:00", "12:00",
             "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00",
             "20:00", "21:00", "22:00", "23:00"
@@ -242,13 +404,13 @@ class AlarmScheduler(private val context: Context) {
             )
             alarmManager.cancel(snoozePi)
             snoozePi.cancel()
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // ignore
         }
     }
 
-    private fun scheduleExact(timeInMillis: Long, pendingIntent: PendingIntent) {
-        try {
+    private fun scheduleExact(timeInMillis: Long, pendingIntent: PendingIntent): ScheduleOutcome {
+        return try {
             val showIntent = Intent(context, com.example.MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
@@ -260,6 +422,7 @@ class AlarmScheduler(private val context: Context) {
             )
             val alarmClockInfo = AlarmManager.AlarmClockInfo(timeInMillis, showPendingIntent)
             alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
+            ScheduleOutcome(success = true, triggerAtMillis = timeInMillis, methodUsed = "setAlarmClock")
         } catch (e: Exception) {
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -267,9 +430,22 @@ class AlarmScheduler(private val context: Context) {
                 } else {
                     alarmManager.setExact(AlarmManager.RTC_WAKEUP, timeInMillis, pendingIntent)
                 }
+                ScheduleOutcome(success = true, triggerAtMillis = timeInMillis, methodUsed = "setExactAndAllowWhileIdle")
             } catch (e2: Exception) {
-                // If exact alarm permission not yet granted, fallback to standard alarm
-                alarmManager.set(AlarmManager.RTC_WAKEUP, timeInMillis, pendingIntent)
+                try {
+                    alarmManager.set(AlarmManager.RTC_WAKEUP, timeInMillis, pendingIntent)
+                    ScheduleOutcome(
+                        success = true,
+                        triggerAtMillis = timeInMillis,
+                        methodUsed = "set (exact alarm izni yok: ${e2.localizedMessage})"
+                    )
+                } catch (e3: Exception) {
+                    ScheduleOutcome(
+                        success = false,
+                        triggerAtMillis = timeInMillis,
+                        error = e3.localizedMessage ?: e3::class.java.simpleName
+                    )
+                }
             }
         }
     }
@@ -285,6 +461,11 @@ class AlarmScheduler(private val context: Context) {
             putExtra(EXTRA_COLOR_HEX, medication.colorHex)
             putExtra(EXTRA_AUDIO_PATH, medication.customAudioPath)
             putExtra(EXTRA_IS_SNOOZE, isSnooze)
+            putExtra(EXTRA_FREQUENCY_TYPE, medication.frequencyType)
+            putExtra(EXTRA_DAYS_OF_WEEK, medication.daysOfWeek)
+            putExtra(EXTRA_TIMES_OF_DAY, medication.timesOfDay)
+            putExtra(EXTRA_INTERVAL_HOURS, medication.intervalHours)
+            putExtra(EXTRA_CREATED_AT, medication.createdAt)
         }
     }
 

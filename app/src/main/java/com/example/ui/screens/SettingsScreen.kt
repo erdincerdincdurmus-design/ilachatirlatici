@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -24,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PlayArrow
@@ -57,7 +59,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.alarm.AlarmPermissionHelper
 import com.example.ui.MedicationViewModel
+import com.example.ui.ScreenTab
+import com.example.ui.components.AlarmPermissionsSummaryCard
 import java.io.File
 
 @Composable
@@ -72,6 +77,16 @@ fun SettingsScreen(viewModel: MedicationViewModel) {
     var customGlobalVoicePath by remember { mutableStateOf(viewModel.prefs.defaultCustomVoicePath) }
 
     val isRecording by viewModel.isRecording.collectAsState()
+    val permissionStatus by viewModel.alarmPermissionStatus.collectAsState()
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        viewModel.refreshAlarmPermissionStatus(context)
+        if (!isGranted) {
+            AlarmPermissionHelper.openNotificationSettings(context)
+        }
+    }
 
     // File picker launcher for audio files (.mp3, .wav, .m4a)
     val audioPickerLauncher = rememberLauncherForActivityResult(
@@ -489,29 +504,72 @@ fun SettingsScreen(viewModel: MedicationViewModel) {
             }
         }
 
-        // 6. Test Alarm Button (Placed neatly in Settings)
+        // 6. Sistem İzinleri ve Alarm Kanalı Kontrolü
         item {
-            Button(
-                onClick = { viewModel.triggerTestAlarm(context = context) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626))
-            ) {
-                Icon(
-                    imageVector = Icons.Default.NotificationsActive,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Tam Ekran Alarmı Test Et",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
+            AlarmPermissionsSummaryCard(
+                status = permissionStatus,
+                onRequestNotificationPermission = {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        AlarmPermissionHelper.openNotificationSettings(context)
+                    }
+                }
+            )
+        }
+
+        // 7. Alarm Kayıtlarını Gör & Test Alarm Button
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        viewModel.historySubTab.value = 1
+                        viewModel.currentTab.value = ScreenTab.HISTORY
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("settings_open_alarm_logs_button"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.History,
+                        contentDescription = null,
+                        tint = Color(0xFF0284C7),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Alarm Kayıtlarını Görüntüle",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF0284C7)
+                    )
+                }
+
+                Button(
+                    onClick = { viewModel.triggerTestAlarm(context = context) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("settings_test_alarm_button"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.NotificationsActive,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Tam Ekran Alarmı Test Et",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
             }
         }
 

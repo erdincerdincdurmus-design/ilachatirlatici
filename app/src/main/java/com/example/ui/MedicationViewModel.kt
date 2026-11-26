@@ -5,13 +5,18 @@ import android.content.Context
 import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.alarm.AlarmPermissionHelper
+import com.example.alarm.AlarmPermissionStatus
 import com.example.alarm.AlarmScheduler
+import com.example.alarm.DailyAlarmRescheduleWorker
 import com.example.audio.VoiceManager
 import com.example.data.AppDatabase
 import com.example.data.PreferencesManager
+import com.example.data.model.AlarmEventLog
 import com.example.data.model.IntakeLog
 import com.example.data.model.Medication
 import com.example.data.repository.MedicationRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -49,18 +54,45 @@ class MedicationViewModel(application: Application) : AndroidViewModel(applicati
 
     private val db = AppDatabase.getDatabase(application)
     private val scheduler = AlarmScheduler(application)
-    val repository = MedicationRepository(application, db.medicationDao(), db.intakeLogDao(), scheduler)
+    val repository = MedicationRepository(
+        application,
+        db.medicationDao(),
+        db.intakeLogDao(),
+        scheduler,
+        db.alarmEventLogDao()
+    )
     val prefs = PreferencesManager(application)
     val voiceManager = VoiceManager(application)
 
     val currentTab = MutableStateFlow(ScreenTab.TODAY)
+    val historySubTab = MutableStateFlow(0)
     val editingMedication = MutableStateFlow<Medication?>(null)
     val isAddingNewMedication = MutableStateFlow(false)
+
+    val alarmPermissionStatus = MutableStateFlow(AlarmPermissionHelper.checkStatus(application))
+    val hasDismissedPermissionDialog = MutableStateFlow(false)
 
     fun resetToTodayScreen() {
         currentTab.value = ScreenTab.TODAY
         editingMedication.value = null
         isAddingNewMedication.value = false
+    }
+
+    fun refreshAlarmPermissionStatus(context: Context = getApplication()) {
+        alarmPermissionStatus.value = AlarmPermissionHelper.checkStatus(context)
+    }
+
+    fun rescheduleAllActiveMedications(source: String = "Uygulama Açılışı") {
+        viewModelScope.launch(Dispatchers.IO) {
+            DailyAlarmRescheduleWorker.scheduleDaily(getApplication())
+            scheduler.rescheduleAllActiveMedications(source)
+        }
+    }
+
+    fun clearAlarmLogs() {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.clearAlarmLogs()
+        }
     }
 
     val allMedications: StateFlow<List<Medication>> = repository.allMedications
@@ -72,19 +104,19 @@ class MedicationViewModel(application: Application) : AndroidViewModel(applicati
     val allLogs: StateFlow<List<IntakeLog>> = repository.allLogs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val allAlarmLogs: StateFlow<List<AlarmEventLog>> = repository.allAlarmLogs
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     // Combined stream for Today's Doses
     val todayDoses: StateFlow<List<TodayDoseItem>> = combine(
         repository.activeMedications,
         todayLogs
     ) { meds, logs ->
-        val result = mutableListOf<TodayDoseItem>()
+        val scoredResult = mutableListOf<Pair<Int, TodayDoseItem>>()
         val calendar = Calendar.getInstance()
         val currentHour = calendar.get(Calendar.HOUR_OF_DAY)
         val currentMinute = calendar.get(Calendar.MINUTE)
         val currentMinutesOfDay = currentHour * 60 + currentMinute
-
-        val dayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
-        val normalizedDay = if (dayOfWeek == Calendar.SUNDAY) 7 else dayOfWeek - 1
 
         for (med in meds) {
             // Check if this medication applies to today
@@ -92,19 +124,26 @@ class MedicationViewModel(application: Application) : AndroidViewModel(applicati
                 continue
             }
 
-            for (timeStr in med.parseTimesList()) {
+            val medTimes = med.parseTimesList()
+            val firstTimeParts = medTimes.firstOrNull()?.split(":")
+            val firstMinutes = (firstTimeParts?.getOrNull(0)?.toIntOrNull() ?: 8) * 60 +
+                (firstTimeParts?.getOrNull(1)?.toIntOrNull() ?: 0)
+
+            for (timeStr in medTimes) {
                 val log = logs.find { it.medicationId == med.id && it.scheduledTime == timeStr }
                 val isTaken = log != null
 
                 val timeParts = timeStr.split(":")
                 val scheduledHour = timeParts.getOrNull(0)?.toIntOrNull() ?: 8
                 val scheduledMinute = timeParts.getOrNull(1)?.toIntOrNull() ?: 0
-                val scheduledMinutesOfDay = scheduledHour * 60 + scheduledMinute
+                val rawMinutesOfDay = scheduledHour * 60 + scheduledMinute
 
-                val isDueOrOverdue = !isTaken && (currentMinutesOfDay >= scheduledMinutesOfDay)
+                // Times that wrap past midnight (e.g. 00:00, 01:00, 02:00 after an 08:00 start) belong at the end of the cycle
+                val logicalMinutes = if (rawMinutesOfDay < firstMinutes) rawMinutesOfDay + 1440 else rawMinutesOfDay
+                val isDueOrOverdue = !isTaken && (currentMinutesOfDay >= logicalMinutes)
 
-                result.add(
-                    TodayDoseItem(
+                scoredResult.add(
+                    logicalMinutes to TodayDoseItem(
                         medicationId = med.id,
                         medicationName = med.name,
                         dosage = med.dosage,
@@ -121,14 +160,14 @@ class MedicationViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
 
-        // Sort: Due first, then Upcoming, then Taken at the end (or chronological)
-        result.sortedWith(
+        // Sort: Due first, then Upcoming in cycle order, then Taken at the bottom
+        scoredResult.sortedWith(
             compareBy(
-                { it.isTaken }, // Taken at the bottom
-                { !it.isDueOrOverdue }, // Due at the top
-                { it.scheduledTime }
+                { it.second.isTaken },
+                { !it.second.isDueOrOverdue },
+                { it.first }
             )
-        )
+        ).map { it.second }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Audio recording state
@@ -222,34 +261,25 @@ class MedicationViewModel(application: Application) : AndroidViewModel(applicati
         lastTestTriggerTime = now
 
         val targetMed = medication ?: allMedications.value.firstOrNull { it.isActive }
-        val medName = targetMed?.name ?: "Örnek İlaç (Tansiyon)"
+        val medId = targetMed?.id ?: 888888L
+        val medName = targetMed?.name ?: "Örnek İlaç (Test)"
         val medDosage = targetMed?.dosage ?: "1 Tablet"
         val medMeal = targetMed?.mealTiming ?: "Tok Karna"
-        val medColor = targetMed?.colorHex ?: 0xFF1976D2
         val medAudio = targetMed?.customAudioPath ?: prefs.defaultCustomVoicePath
 
         val targetContext = context ?: getApplication<Application>()
-        try {
-            val intent = Intent(targetContext, com.example.alarm.AlarmActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP
-                putExtra(AlarmScheduler.EXTRA_MEDICATION_ID, targetMed?.id ?: -999L)
-                putExtra(AlarmScheduler.EXTRA_MEDICATION_NAME, medName)
-                putExtra(AlarmScheduler.EXTRA_DOSAGE, medDosage)
-                putExtra(AlarmScheduler.EXTRA_MEAL_TIMING, medMeal)
-                putExtra(AlarmScheduler.EXTRA_SCHEDULED_TIME, "12:00")
-                putExtra(AlarmScheduler.EXTRA_COLOR_HEX, medColor)
-                putExtra(AlarmScheduler.EXTRA_AUDIO_PATH, medAudio)
-                putExtra(AlarmScheduler.EXTRA_IS_SNOOZE, false)
-                putExtra(AlarmScheduler.EXTRA_IS_TEST, true)
-            }
-            targetContext.startActivity(intent)
-        } catch (e: Exception) {
-            if (targetMed != null) {
-                repository.triggerTestAlarm(targetMed)
-            }
-        }
+        scheduler.triggerImmediateTest(
+            medicationId = medId,
+            medicationName = medName,
+            dosage = medDosage,
+            mealTiming = medMeal,
+            audioPath = medAudio
+        )
+        android.widget.Toast.makeText(
+            targetContext,
+            "Test alarmı 2 saniye içinde bildirim olarak tetiklenecek.",
+            android.widget.Toast.LENGTH_SHORT
+        ).show()
     }
 
     fun checkAndShowPendingAlarm(context: Context) {
